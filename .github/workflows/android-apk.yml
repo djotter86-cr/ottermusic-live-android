@@ -59,8 +59,25 @@ jobs:
             -storepass android \
             -alias androiddebugkey
 
+      - name: AndroidManifest pruefen
+        run: |
+          echo "Pruefe die AndroidManifest.xml..."
+          python3 - <<'PY'
+          import xml.etree.ElementTree as ET
+
+          path = "app/src/main/AndroidManifest.xml"
+
+          try:
+              ET.parse(path)
+              print("AndroidManifest.xml ist gueltiges XML.")
+          except ET.ParseError as error:
+              print("FEHLER in AndroidManifest.xml:")
+              print(error)
+              raise SystemExit(1)
+          PY
+
       - name: APK erstellen
-        run: gradle --no-daemon :app:assembleDebug
+        run: gradle --no-daemon :app:assembleDebug --stacktrace --info
 
       - name: APK-Signatur anzeigen
         run: |
