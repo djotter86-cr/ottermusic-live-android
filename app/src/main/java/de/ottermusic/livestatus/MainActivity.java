@@ -124,15 +124,7 @@ public class MainActivity extends Activity {
         if (Build.VERSION.SDK_INT >= 33) registerReceiver(downloadReceiver, new IntentFilter(DownloadManager.ACTION_DOWNLOAD_COMPLETE), Context.RECEIVER_NOT_EXPORTED);
         else registerReceiver(downloadReceiver, new IntentFilter(DownloadManager.ACTION_DOWNLOAD_COMPLETE));
         showHome();
-        com.google.firebase.messaging.FirebaseMessaging.getInstance()
-            .getToken()
-            .addOnCompleteListener(task -> {
-                if (!task.isSuccessful()) {
-                    android.util.Log.w("OtterFirebase", "FCM-Token konnte nicht abgerufen werden", task.getException());
-                    return;
-                }
-                android.util.Log.d("OtterFirebase", "FCM-Token erfolgreich erhalten");
-            });
+        PushRegistration.sync(this);
     }
     @Override protected void onResume() {
         super.onResume();
@@ -473,7 +465,7 @@ public class MainActivity extends Activity {
         marginTop(content, updateButton, 12);
         updateButton.setOnClickListener(v -> checkForUpdate(true));
         marginTop(content, text("Benachrichtigungen", 19, WHITE, true), 32);
-        marginTop(content, text("Bei einem erkannten Wechsel von OFFLINE zu LIVE erscheint eine Benachrichtigung, solange die App geöffnet ist. Bei geschlossener App werden noch keine LIVE-Starts überwacht.", 14, MUTED, false), 12);
+        marginTop(content, text("Bei einem erkannten Wechsel von OFFLINE zu LIVE erscheint eine Benachrichtigung, solange die App geöffnet ist. Bei geschlossener App können Push-Nachrichten über den OtterMusic-Server eintreffen, sobald die Server-Anmeldung erfolgreich ist.", 14, MUTED, false), 12);
         marginTop(content, text("Impressum", 19, WHITE, true), 32);
         marginTop(content, text("Angaben gemäß § 5 DDG\n\nChristoph Richrath\nRichrath.eu / OtterMusic\nAm Ringofen 3\n50321 Brühl\nDeutschland\n\nKontakt\nTelefon: 02232 / 5007082", 14, MUTED, false), 12);
         TextView email = text("info@ottermusic.de", 14, BLUE, false);
@@ -594,5 +586,6 @@ public class MainActivity extends Activity {
     private void saveCreators() {
         JSONArray array = new JSONArray(); for (String creator : creators) array.put(creator);
         preferences.edit().putString("creators", array.toString()).apply();
+        PushRegistration.sync(this);
     }
 }
