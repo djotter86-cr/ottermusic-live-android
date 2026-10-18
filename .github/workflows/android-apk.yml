@@ -1,4 +1,3 @@
-
 name: TikTok Live Status APK
 
 on:
@@ -48,12 +47,9 @@ jobs:
           fi
 
           mkdir -p "$HOME/.android"
-
           printf '%s' "$KEYSTORE_BASE64" | base64 --decode \
             > "$HOME/.android/debug.keystore"
-
           chmod 600 "$HOME/.android/debug.keystore"
-
           keytool -list \
             -keystore "$HOME/.android/debug.keystore" \
             -storepass android \
@@ -64,9 +60,7 @@ jobs:
           echo "Pruefe die AndroidManifest.xml..."
           python3 - <<'PY'
           import xml.etree.ElementTree as ET
-
           path = "app/src/main/AndroidManifest.xml"
-
           try:
               ET.parse(path)
               print("AndroidManifest.xml ist gueltiges XML.")
@@ -85,9 +79,30 @@ jobs:
             --print-certs \
             app/build/outputs/apk/debug/app-debug.apk
 
+      - name: APK automatisch nach Version benennen
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+          import shutil
+          gradle = Path('app/build.gradle').read_text(encoding='utf-8')
+          name = re.search(r'(?m)^\s*versionName\s+[\'\"]([^\'\"]+)[\'\"]', gradle)
+          code = re.search(r'(?m)^\s*versionCode\s+(\d+)', gradle)
+          if not name or not code:
+              raise SystemExit('FEHLER: versionName oder versionCode in app/build.gradle fehlt.')
+          version = name.group(1)
+          if not re.fullmatch(r'[0-9]+(?:\.[0-9]+){1,3}', version):
+              raise SystemExit('FEHLER: Unerwartetes Versionsformat: ' + version)
+          source = Path('app/build/outputs/apk/debug/app-debug.apk')
+          destination = source.with_name(f'TikTok-LIVE-{version}.apk')
+          shutil.copy2(source, destination)
+          print(f'APK bereit: {destination} (versionCode {code.group(1)})')
+          PY
+
       - name: APK bereitstellen
         uses: actions/upload-artifact@v4
         with:
-          name: TikTok-Live-Status-APK
-          path: app/build/outputs/apk/debug/app-debug.apk
+          name: TikTok-LIVE-APK
+          path: app/build/outputs/apk/debug/TikTok-LIVE-*.apk
           if-no-files-found: error
