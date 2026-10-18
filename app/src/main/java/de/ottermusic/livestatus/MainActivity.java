@@ -2,6 +2,14 @@ package de.ottermusic.livestatus;
 
 import android.app.Activity;
 import android.app.AlertDialog;
+import android.app.DownloadManager;
+import android.content.BroadcastReceiver;
+import android.content.Context;
+import android.content.IntentFilter;
+import android.content.pm.PackageManager;
+import android.os.Build;
+import android.os.Environment;
+import android.provider.Settings;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
@@ -31,6 +39,7 @@ import java.net.URLEncoder;
 import java.io.InputStream;
 import java.io.ByteArrayOutputStream;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.Locale;
 import java.util.Map;
@@ -44,6 +53,27 @@ public class MainActivity extends Activity {
     private final int MUTED = Color.rgb(155, 165, 185);
     private final int ACCENT = Color.rgb(235, 55, 100);
     private final int BLUE = Color.rgb(38, 195, 244);
+    private static final String UPDATE_URL = "https://ottermusic.de/wp-content/App/tt-live-app/update.json";
+    private static final long UPDATE_INTERVAL_MS = 6L * 60 * 60 * 1000;
+    private long downloadId = -1;
+    private boolean updateChecking = false;
+    private LinearLayout creatorCards;
+    private final BroadcastReceiver downloadReceiver = new BroadcastReceiver() {
+        @Override public void onReceive(Context context, Intent intent) {
+            if (!DownloadManager.ACTION_DOWNLOAD_COMPLETE.equals(intent.getAction())) return;
+            long completed = intent.getLongExtra(DownloadManager.EXTRA_DOWNLOAD_ID, -1);
+            if (completed != downloadId) return;
+            DownloadManager dm = (DownloadManager) getSystemService(DOWNLOAD_SERVICE);
+            DownloadManager.Query q = new DownloadManager.Query().setFilterById(completed);
+            try (android.database.Cursor c = dm.query(q)) {
+                if (c != null && c.moveToFirst() && c.getInt(c.getColumnIndexOrThrow(DownloadManager.COLUMN_STATUS)) == DownloadManager.STATUS_SUCCESSFUL) {
+                    new AlertDialog.Builder(MainActivity.this).setTitle("Download abgeschlossen")
+                        .setMessage("Soll die neue Version jetzt installiert werden?")
+                        .setNegativeButton("Später", null).setPositiveButton("Installieren", (d, w) -> installDownloadedApk()).show();
+                } else Toast.makeText(MainActivity.this, "Download fehlgeschlagen.", Toast.LENGTH_LONG).show();
+            } catch (Exception e) { Toast.makeText(MainActivity.this, "Download konnte nicht geprüft werden.", Toast.LENGTH_LONG).show(); }
+        }
+    };
     private static final String STATUS_URL = "https://www.ottermusic.de/wp-json/ottermusic-live/v1/creators";
     private final Handler handler = new Handler(Looper.getMainLooper());
     private final ExecutorService executor = Executors.newSingleThreadExecutor();
@@ -75,6 +105,8 @@ public class MainActivity extends Activity {
         getWindow().setNavigationBarColor(BG);
         preferences = getSharedPreferences("live_status", MODE_PRIVATE);
         loadCreators();
+        if (Build.VERSION.SDK_INT >= 33) registerReceiver(downloadReceiver, new IntentFilter(DownloadManager.ACTION_DOWNLOAD_COMPLETE), Context.RECEIVER_NOT_EXPORTED);
+        else registerReceiver(downloadReceiver, new IntentFilter(DownloadManager.ACTION_DOWNLOAD_COMPLETE));
         showHome();
     }
     @Override protected void onResume() {
@@ -82,6 +114,7 @@ public class MainActivity extends Activity {
         visible = true;
         handler.removeCallbacks(refreshTask);
         handler.post(refreshTask);
+        checkForUpdate(false);
     }
     @Override protected void onPause() {
         visible = false;
@@ -90,6 +123,7 @@ public class MainActivity extends Activity {
     }
     @Override protected void onDestroy() {
         handler.removeCallbacks(refreshTask);
+        try { unregisterReceiver(downloadReceiver); } catch (Exception ignored) {}
         executor.shutdownNow();
         super.onDestroy();
     }
@@ -162,8 +196,29 @@ public class MainActivity extends Activity {
         Button add = actionButton("+ Creator hinzufügen"); marginTop(addPanel, add, 12); add.setOnClickListener(v -> addCreator());
         marginTop(content, addPanel, 24);
         marginTop(content, text("Meine Creator (" + creators.size() + ")", 20, WHITE, true), 26);
-        if (creators.isEmpty()) marginTop(content, text("Du hast noch keine Creator gespeichert.\nFüge oben deinen ersten TikTok-Creator hinzu.", 14, MUTED, false), 18);
-        else for (String creator : new ArrayList<>(creators)) addCreatorCard(creator);
+        creatorCards = vertical();
+        content.addView(creatorCards);
+        renderSortedCreators();
+    }
+    private int statusRank(String creator) {
+        String state = statuses.get(creator.toLowerCase(Locale.ROOT));
+        if ("live".equals(state)) return 0;
+        if ("offline".equals(state)) return 1;
+        return 2;
+    }
+    private void renderSortedCreators() {
+        if (!onHome || creatorCards == null) return;
+        creatorCards.removeAllViews();
+        statusViews.clear();
+        avatarViews.clear();
+        if (creators.isEmpty()) {
+            marginTop(creatorCards, text("Du hast noch keine Creator gespeichert.\nFüge oben deinen ersten TikTok-Creator hinzu.", 14, MUTED, false), 18);
+            return;
+        }
+        ArrayList<String> ordered = new ArrayList<>(creators);
+        // Java's stable sort preserves the original order within each status group.
+        Collections.sort(ordered, (a, b) -> Integer.compare(statusRank(a), statusRank(b)));
+        for (String creator : ordered) addCreatorCard(creator);
     }
     private void addCreatorCard(String creator) {
         LinearLayout card = new LinearLayout(this); card.setOrientation(LinearLayout.HORIZONTAL);
@@ -191,7 +246,7 @@ public class MainActivity extends Activity {
                 creators.remove(creator); saveCreators(); showHome();
             }).show());
         card.addView(remove, new LinearLayout.LayoutParams(dp(52), dp(52)));
-        details.setOnClickListener(v -> openTikTok(creator)); marginTop(content, card, 12);
+        details.setOnClickListener(v -> openTikTok(creator)); marginTop(creatorCards, card, 12);
     }
     private void updateStatusLabel(TextView label, String state) {
         if ("live".equals(state)) { label.setText("● LIVE"); label.setTextColor(Color.rgb(55, 220, 140)); }
@@ -286,12 +341,16 @@ public class MainActivity extends Activity {
                     Bitmap avatar = avatarCache.get(view.getKey());
                     if (avatar != null) view.getValue().setImageBitmap(avatar);
                 }
+                boolean changedOrder = false;
                 for (String creator : creators) {
                     String handle = creator.toLowerCase(Locale.ROOT);
+                    int before = statusRank(creator);
                     statuses.put(handle, ok ? latest.getOrDefault(handle, "missing") : "error");
+                    if (before != statusRank(creator)) changedOrder = true;
                     TextView label = statusViews.get(handle);
                     if (label != null) updateStatusLabel(label, statuses.get(handle));
                 }
+                if (changedOrder) renderSortedCreators();
                 lastUpdate = info;
                 if (refreshInfo != null && onHome) refreshInfo.setText(info + " · Automatisch alle 5 Sekunden");
             });
@@ -320,8 +379,113 @@ public class MainActivity extends Activity {
         setup(false);
         marginTop(content, text("LIVE-Status", 19, WHITE, true), 30);
         marginTop(content, text("Die App fragt den OtterMusic-Server alle 5 Sekunden ab, solange sie geöffnet ist. Der Server bestimmt selbst, wie oft TikTok geprüft wird.\n\nAuch neue TikTok-Namen werden über den OtterMusic-Server geprüft. Die eigentliche TikTok-Prüfung erfolgt nach dem Server-Intervall.", 14, MUTED, false), 12);
+        marginTop(content, text("App-Updates", 19, WHITE, true), 32);
+        marginTop(content, text("Die App sucht beim Öffnen und danach höchstens alle 6 Stunden nach einer neueren Version auf ottermusic.de.", 14, MUTED, false), 12);
+        Button updateButton = actionButton("Jetzt nach Updates suchen");
+        marginTop(content, updateButton, 12);
+        updateButton.setOnClickListener(v -> checkForUpdate(true));
         marginTop(content, text("Benachrichtigungen", 19, WHITE, true), 32);
         marginTop(content, text("Benachrichtigungen beim LIVE-Start werden im nächsten Schritt ergänzt.", 14, MUTED, false), 12);
+    }
+    private void checkForUpdate(boolean manual) {
+        if (updateChecking) return;
+        long now = System.currentTimeMillis();
+        if (!manual && now - preferences.getLong("last_update_check", 0) < UPDATE_INTERVAL_MS) return;
+        updateChecking = true;
+        executor.execute(() -> {
+            String version = "";
+            String apkUrl = "";
+            int code = 0;
+            String error = null;
+            HttpURLConnection connection = null;
+            try {
+                connection = (HttpURLConnection) new URL(UPDATE_URL).openConnection();
+                connection.setConnectTimeout(6000);
+                connection.setReadTimeout(6000);
+                connection.setUseCaches(false);
+                if (connection.getResponseCode() != 200) throw new Exception("HTTP " + connection.getResponseCode());
+                ByteArrayOutputStream buffer = new ByteArrayOutputStream();
+                try (InputStream in = connection.getInputStream()) {
+                    byte[] bytes = new byte[2048]; int n;
+                    while ((n = in.read(bytes)) != -1) {
+                        if (buffer.size() + n > 16000) throw new Exception("Update-Datei zu groß");
+                        buffer.write(bytes, 0, n);
+                    }
+                }
+                JSONObject json = new JSONObject(buffer.toString("UTF-8"));
+                code = json.getInt("versionCode");
+                version = json.optString("versionName", String.valueOf(code));
+                apkUrl = json.getString("apkUrl");
+                Uri uri = Uri.parse(apkUrl);
+                if (!"https".equalsIgnoreCase(uri.getScheme()) || !"www.ottermusic.de".equalsIgnoreCase(uri.getHost()) ||
+                    !uri.getPath().startsWith("/tt-live-app/") || !uri.getPath().endsWith(".apk"))
+                    throw new Exception("Ungültige APK-Adresse");
+                preferences.edit().putLong("last_update_check", System.currentTimeMillis()).apply();
+            } catch (Exception e) { error = e.getMessage(); }
+            finally { if (connection != null) connection.disconnect(); }
+            final String latestName = version;
+            final String latestApk = apkUrl;
+            final int latestCode = code;
+            final String problem = error;
+            handler.post(() -> {
+                updateChecking = false;
+                if (isFinishing() || isDestroyed()) return;
+                if (problem != null) {
+                    if (manual) new AlertDialog.Builder(this).setTitle("Update-Prüfung")
+                        .setMessage("Die Update-Datei ist nicht erreichbar oder ungültig. Bitte prüfe update.json auf deiner Webseite.")
+                        .setPositiveButton("OK", null).show();
+                    return;
+                }
+                long installed;
+                try {
+                    android.content.pm.PackageInfo info = getPackageManager().getPackageInfo(getPackageName(), 0);
+                    installed = Build.VERSION.SDK_INT >= 28 ? info.getLongVersionCode() : info.versionCode;
+                } catch (Exception e) { installed = 0; }
+                if (latestCode > installed) {
+                    new AlertDialog.Builder(this).setTitle("Update verfügbar 🦦")
+                        .setMessage("Version " + latestName + " ist verfügbar. Soll die neue APK heruntergeladen werden?")
+                        .setNegativeButton("Nein", null)
+                        .setPositiveButton("Herunterladen", (d, w) -> downloadUpdate(latestApk)).show();
+                } else if (manual) new AlertDialog.Builder(this).setTitle("Alles aktuell")
+                    .setMessage("Du hast bereits die neueste Version installiert.")
+                    .setPositiveButton("OK", null).show();
+            });
+        });
+    }
+    private void downloadUpdate(String apkUrl) {
+        try {
+            DownloadManager.Request request = new DownloadManager.Request(Uri.parse(apkUrl));
+            request.setTitle("OtterMusic LIVE – App-Update");
+            request.setDescription("Neue Android-Version wird heruntergeladen");
+            request.setMimeType("application/vnd.android.package-archive");
+            request.setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED);
+            request.setDestinationInExternalFilesDir(this, Environment.DIRECTORY_DOWNLOADS, "OtterMusic-LIVE-Update.apk");
+            DownloadManager dm = (DownloadManager) getSystemService(DOWNLOAD_SERVICE);
+            downloadId = dm.enqueue(request);
+            Toast.makeText(this, "Update wird heruntergeladen …", Toast.LENGTH_LONG).show();
+        } catch (Exception e) { Toast.makeText(this, "Download konnte nicht gestartet werden.", Toast.LENGTH_LONG).show(); }
+    }
+    private void installDownloadedApk() {
+        try {
+            if (Build.VERSION.SDK_INT >= 26 && !getPackageManager().canRequestPackageInstalls()) {
+                new AlertDialog.Builder(this).setTitle("Installation erlauben")
+                    .setMessage("Android muss einmalig die Installation von Updates aus dieser App erlauben. Danach kannst du die Installation über die Download-Benachrichtigung erneut starten.")
+                    .setNegativeButton("Abbrechen", null)
+                    .setPositiveButton("Einstellungen öffnen", (d, w) -> {
+                        Intent settings = new Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
+                            Uri.parse("package:" + getPackageName()));
+                        startActivity(settings);
+                    }).show();
+                return;
+            }
+            DownloadManager dm = (DownloadManager) getSystemService(DOWNLOAD_SERVICE);
+            Uri apk = dm.getUriForDownloadedFile(downloadId);
+            if (apk == null) throw new Exception("APK fehlt");
+            Intent install = new Intent(Intent.ACTION_VIEW);
+            install.setDataAndType(apk, "application/vnd.android.package-archive");
+            install.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+            startActivity(install);
+        } catch (Exception e) { Toast.makeText(this, "Installation konnte nicht gestartet werden.", Toast.LENGTH_LONG).show(); }
     }
     private void loadCreators() {
         creators.clear(); String json = preferences.getString("creators", "[]");
