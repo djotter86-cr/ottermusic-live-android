@@ -124,6 +124,15 @@ public class MainActivity extends Activity {
         if (Build.VERSION.SDK_INT >= 33) registerReceiver(downloadReceiver, new IntentFilter(DownloadManager.ACTION_DOWNLOAD_COMPLETE), Context.RECEIVER_NOT_EXPORTED);
         else registerReceiver(downloadReceiver, new IntentFilter(DownloadManager.ACTION_DOWNLOAD_COMPLETE));
         showHome();
+        com.google.firebase.messaging.FirebaseMessaging.getInstance()
+            .getToken()
+            .addOnCompleteListener(task -> {
+                if (!task.isSuccessful()) {
+                    android.util.Log.w("OtterFirebase", "FCM-Token konnte nicht abgerufen werden", task.getException());
+                    return;
+                }
+                android.util.Log.d("OtterFirebase", "FCM-Token erfolgreich erhalten");
+            });
     }
     @Override protected void onResume() {
         super.onResume();
