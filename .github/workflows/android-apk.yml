@@ -26,6 +26,8 @@ jobs:
 
       - name: Android SDK einrichten
         uses: android-actions/setup-android@v3
+        with:
+          packages: 'platform-tools'
 
       - name: Android Plattform installieren
         run: |
@@ -42,7 +44,6 @@ jobs:
         run: |
           if [ -z "$KEYSTORE_BASE64" ]; then
             echo "FEHLER: Signaturschluessel fehlt."
-            echo "Bitte ANDROID_DEBUG_KEYSTORE_BASE64 einrichten."
             exit 1
           fi
 
