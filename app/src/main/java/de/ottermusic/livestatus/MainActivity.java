@@ -9,6 +9,8 @@ import android.content.Intent;
 import android.net.Uri;
 import android.content.SharedPreferences;
 import android.graphics.Color;
+import android.graphics.Bitmap;
+import android.graphics.BitmapFactory;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
 import android.view.Gravity;
@@ -25,6 +27,7 @@ import org.json.JSONArray;
 import org.json.JSONObject;
 import java.net.HttpURLConnection;
 import java.net.URL;
+import java.net.URLEncoder;
 import java.io.InputStream;
 import java.io.ByteArrayOutputStream;
 import java.util.ArrayList;
@@ -41,12 +44,15 @@ public class MainActivity extends Activity {
     private final int MUTED = Color.rgb(155, 165, 185);
     private final int ACCENT = Color.rgb(235, 55, 100);
     private final int BLUE = Color.rgb(38, 195, 244);
-    private static final String STATUS_URL = "https://www.ottermusic.de/wp-admin/admin-ajax.php?action=olc_status";
+    private static final String STATUS_URL = "https://www.ottermusic.de/wp-json/ottermusic-live/v1/creators";
     private final Handler handler = new Handler(Looper.getMainLooper());
     private final ExecutorService executor = Executors.newSingleThreadExecutor();
     private final ArrayList<String> creators = new ArrayList<>();
     private final Map<String, String> statuses = new HashMap<>();
     private final Map<String, TextView> statusViews = new HashMap<>();
+    private final Map<String, ImageView> avatarViews = new HashMap<>();
+    private final Map<String, Bitmap> avatarCache = new HashMap<>();
+    private final Map<String, String> avatarUrls = new HashMap<>();
     private SharedPreferences preferences;
     private LinearLayout root, content;
     private EditText creatorInput;
@@ -105,6 +111,7 @@ public class MainActivity extends Activity {
     private void setup(boolean homeScreen) {
         onHome = homeScreen;
         statusViews.clear();
+        avatarViews.clear();
         refreshInfo = null;
         root = vertical(); root.setBackgroundColor(BG); root.setFitsSystemWindows(false);
         root.setOnApplyWindowInsetsListener((view, insets) -> {
@@ -161,6 +168,16 @@ public class MainActivity extends Activity {
     private void addCreatorCard(String creator) {
         LinearLayout card = new LinearLayout(this); card.setOrientation(LinearLayout.HORIZONTAL);
         card.setGravity(Gravity.CENTER_VERTICAL); card.setPadding(dp(15), dp(16), dp(10), dp(16)); card.setBackground(background(PANEL, 16));
+        ImageView avatar = new ImageView(this);
+        LinearLayout.LayoutParams avatarParams = new LinearLayout.LayoutParams(dp(54), dp(54));
+        avatarParams.rightMargin = dp(12);
+        avatar.setScaleType(ImageView.ScaleType.CENTER_CROP);
+        avatar.setBackground(background(Color.rgb(43, 51, 70), 27));
+        avatar.setClipToOutline(true);
+        String handle = creator.toLowerCase(Locale.ROOT);
+        avatarViews.put(handle, avatar);
+        if (avatarCache.containsKey(handle)) avatar.setImageBitmap(avatarCache.get(handle));
+        card.addView(avatar, avatarParams);
         LinearLayout details = vertical(); details.addView(text("@" + creator, 17, WHITE, true));
         TextView status = text("", 12, MUTED, false); updateStatusLabel(status, statuses.get(creator.toLowerCase(Locale.ROOT)));
         marginTop(details, status, 6); statusViews.put(creator.toLowerCase(Locale.ROOT), status);
@@ -179,7 +196,7 @@ public class MainActivity extends Activity {
     private void updateStatusLabel(TextView label, String state) {
         if ("live".equals(state)) { label.setText("● LIVE"); label.setTextColor(Color.rgb(55, 220, 140)); }
         else if ("offline".equals(state)) { label.setText("● OFFLINE"); label.setTextColor(MUTED); }
-        else if ("missing".equals(state)) { label.setText("● Noch nicht auf dem Server eingetragen"); label.setTextColor(MUTED); }
+        else if ("missing".equals(state)) { label.setText("● Noch keine Daten vorhanden"); label.setTextColor(MUTED); }
         else if ("error".equals(state)) { label.setText("● Server nicht erreichbar"); label.setTextColor(ACCENT); }
         else { label.setText("● Status unbekannt – nächste Prüfung folgt"); label.setTextColor(BLUE); }
     }
@@ -188,10 +205,21 @@ public class MainActivity extends Activity {
         loading = true;
         executor.execute(() -> {
             Map<String,String> latest = new HashMap<>();
+            Map<String,String> images = new HashMap<>();
+            Map<String,Bitmap> newAvatars = new HashMap<>();
             String result = "Server nicht erreichbar";
             HttpURLConnection connection = null;
             try {
-                connection = (HttpURLConnection) new URL(STATUS_URL).openConnection();
+                StringBuilder names = new StringBuilder();
+                for (String creator : new ArrayList<>(creators)) {
+                    if (names.length() > 0) names.append(",");
+                    names.append(creator);
+                }
+                if (names.length() == 0) {
+                    result = "Keine Creator gespeichert";
+                    throw new Exception("Keine Creator");
+                }
+                connection = (HttpURLConnection) new URL(STATUS_URL + "?names=" + URLEncoder.encode(names.toString(), "UTF-8")).openConnection();
                 connection.setConnectTimeout(6000); connection.setReadTimeout(6000);
                 connection.setRequestProperty("Accept", "application/json");
                 connection.setRequestProperty("Cache-Control", "no-cache");
@@ -208,19 +236,37 @@ public class MainActivity extends Activity {
                 JSONObject response = new JSONObject(bytes.toString("UTF-8"));
                 if (!response.optBoolean("success")) throw new Exception("Ungültige Server-Antwort");
                 JSONObject data = response.getJSONObject("data");
-                // These six IDs are the creators returned by the existing OtterMusic endpoint.
-                // The endpoint does not provide handles; mappings must not be guessed for other IDs.
-                String[][] known = {
-                    {"1498", "_dj_otter_"}, {"1502", "kimbossible3"},
-                    {"1505", "neag_offiziell_"}, {"1510", "darki3201"},
-                    {"1513", "sebastianbackinsehhaus"}, {"1517", ".kendry"}
-                };
-                for (String[] entry : known) {
-                    JSONObject item = data.optJSONObject(entry[0]);
+                // The new bridge returns data keyed by TikTok username, not WordPress IDs.
+                java.util.Iterator<String> keys = data.keys();
+                while (keys.hasNext()) {
+                    String handle = keys.next().toLowerCase(Locale.ROOT);
+                    JSONObject item = data.optJSONObject(handle);
                     if (item == null) continue;
                     String state = item.optString("status", "unknown").toLowerCase(Locale.ROOT);
                     if (!"live".equals(state) && !"offline".equals(state)) state = "unknown";
-                    latest.put(entry[1].toLowerCase(Locale.ROOT), state);
+                    latest.put(handle, state);
+                    String imageUrl = item.optString("image", "");
+                    if (imageUrl.startsWith("https://")) images.put(handle, imageUrl);
+                }
+                for (Map.Entry<String,String> image : images.entrySet()) {
+                    String handle = image.getKey();
+                    String imageUrl = image.getValue();
+                    if (imageUrl.equals(avatarUrls.get(handle)) && avatarCache.containsKey(handle)) continue;
+                    HttpURLConnection imageConnection = null;
+                    try {
+                        imageConnection = (HttpURLConnection) new URL(imageUrl).openConnection();
+                        imageConnection.setConnectTimeout(3000);
+                        imageConnection.setReadTimeout(3000);
+                        if (imageConnection.getResponseCode() == 200) {
+                            try (InputStream imageStream = imageConnection.getInputStream()) {
+                                Bitmap bitmap = BitmapFactory.decodeStream(imageStream);
+                                if (bitmap != null) newAvatars.put(handle, bitmap);
+                            }
+                        }
+                    } catch (Exception ignored) {
+                    } finally {
+                        if (imageConnection != null) imageConnection.disconnect();
+                    }
                 }
                 result = "Server-Abfrage erfolgreich";
             } catch (Exception ignored) {
@@ -231,6 +277,15 @@ public class MainActivity extends Activity {
                 loading = false;
                 if (!visible || isFinishing() || isDestroyed()) return;
                 boolean ok = "Server-Abfrage erfolgreich".equals(info);
+                for (Map.Entry<String, Bitmap> image : newAvatars.entrySet()) {
+                    String handle = image.getKey();
+                    avatarCache.put(handle, image.getValue());
+                    avatarUrls.put(handle, images.get(handle));
+                }
+                for (Map.Entry<String, ImageView> view : avatarViews.entrySet()) {
+                    Bitmap avatar = avatarCache.get(view.getKey());
+                    if (avatar != null) view.getValue().setImageBitmap(avatar);
+                }
                 for (String creator : creators) {
                     String handle = creator.toLowerCase(Locale.ROOT);
                     statuses.put(handle, ok ? latest.getOrDefault(handle, "missing") : "error");
@@ -264,7 +319,7 @@ public class MainActivity extends Activity {
     private void showSettings() {
         setup(false);
         marginTop(content, text("LIVE-Status", 19, WHITE, true), 30);
-        marginTop(content, text("Die App fragt den OtterMusic-Server alle 5 Sekunden ab, solange sie geöffnet ist. Der Server bestimmt selbst, wie oft TikTok geprüft wird.\n\nCreator, die noch nicht auf dem Server eingetragen sind, können derzeit nicht zugeordnet werden.", 14, MUTED, false), 12);
+        marginTop(content, text("Die App fragt den OtterMusic-Server alle 5 Sekunden ab, solange sie geöffnet ist. Der Server bestimmt selbst, wie oft TikTok geprüft wird.\n\nAuch neue TikTok-Namen werden über den OtterMusic-Server geprüft. Die eigentliche TikTok-Prüfung erfolgt nach dem Server-Intervall.", 14, MUTED, false), 12);
         marginTop(content, text("Benachrichtigungen", 19, WHITE, true), 32);
         marginTop(content, text("Benachrichtigungen beim LIVE-Start werden im nächsten Schritt ergänzt.", 14, MUTED, false), 12);
     }
