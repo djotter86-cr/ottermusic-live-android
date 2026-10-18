@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "541035165410",
+    "project_id": "tt-live-status-om",
+    "storage_bucket": "tt-live-status-om.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:541035165410:android:801c85981a6fde4b0c50bb",
+        "android_client_info": {
+          "package_name": "de.ottermusic.livestatus"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyBTlzKTrz7At6TNfI42huantN4QsUv2ias"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
