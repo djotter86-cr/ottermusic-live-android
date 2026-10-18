@@ -1,6 +1,10 @@
 package de.ottermusic.livestatus;
 
 import android.app.Activity;
+import android.app.NotificationChannel;
+import android.app.NotificationManager;
+import android.app.Notification;
+import android.app.PendingIntent;
 import android.app.AlertDialog;
 import android.app.DownloadManager;
 import android.content.BroadcastReceiver;
@@ -54,7 +58,9 @@ public class MainActivity extends Activity {
     private final int ACCENT = Color.rgb(235, 55, 100);
     private final int BLUE = Color.rgb(38, 195, 244);
     private static final String UPDATE_URL = "https://ottermusic.de/wp-content/App/tt-live-app/update.json";
-    private static final long UPDATE_INTERVAL_MS = 6L * 60 * 60 * 1000;
+    private static final long UPDATE_INTERVAL_MS = 5L * 60 * 1000;
+    private static final String LIVE_CHANNEL = "ottermusic_live_starts";
+    private final java.util.HashSet<String> observedCreators = new java.util.HashSet<>();
     private long downloadId = -1;
     private boolean updateChecking = false;
     private LinearLayout creatorCards;
@@ -99,12 +105,22 @@ public class MainActivity extends Activity {
         }
     };
 
+    private final Runnable updateTask = new Runnable() {
+        @Override public void run() {
+            if (!visible) return;
+            checkForUpdate(false);
+            handler.postDelayed(this, UPDATE_INTERVAL_MS);
+        }
+    };
     @Override protected void onCreate(Bundle state) {
         super.onCreate(state);
         getWindow().setStatusBarColor(BG);
         getWindow().setNavigationBarColor(BG);
         preferences = getSharedPreferences("live_status", MODE_PRIVATE);
         loadCreators();
+        createNotificationChannel();
+        if (Build.VERSION.SDK_INT >= 33 && checkSelfPermission("android.permission.POST_NOTIFICATIONS") != PackageManager.PERMISSION_GRANTED)
+            requestPermissions(new String[]{"android.permission.POST_NOTIFICATIONS"}, 120);
         if (Build.VERSION.SDK_INT >= 33) registerReceiver(downloadReceiver, new IntentFilter(DownloadManager.ACTION_DOWNLOAD_COMPLETE), Context.RECEIVER_NOT_EXPORTED);
         else registerReceiver(downloadReceiver, new IntentFilter(DownloadManager.ACTION_DOWNLOAD_COMPLETE));
         showHome();
@@ -115,14 +131,18 @@ public class MainActivity extends Activity {
         handler.removeCallbacks(refreshTask);
         handler.post(refreshTask);
         checkForUpdate(false);
+        handler.removeCallbacks(updateTask);
+        handler.postDelayed(updateTask, UPDATE_INTERVAL_MS);
     }
     @Override protected void onPause() {
         visible = false;
         handler.removeCallbacks(refreshTask);
+        handler.removeCallbacks(updateTask);
         super.onPause();
     }
     @Override protected void onDestroy() {
         handler.removeCallbacks(refreshTask);
+        handler.removeCallbacks(updateTask);
         try { unregisterReceiver(downloadReceiver); } catch (Exception ignored) {}
         executor.shutdownNow();
         super.onDestroy();
@@ -221,39 +241,91 @@ public class MainActivity extends Activity {
         for (String creator : ordered) addCreatorCard(creator);
     }
     private void addCreatorCard(String creator) {
-        LinearLayout card = new LinearLayout(this); card.setOrientation(LinearLayout.HORIZONTAL);
-        card.setGravity(Gravity.CENTER_VERTICAL); card.setPadding(dp(15), dp(16), dp(10), dp(16)); card.setBackground(background(PANEL, 16));
-        ImageView avatar = new ImageView(this);
-        LinearLayout.LayoutParams avatarParams = new LinearLayout.LayoutParams(dp(54), dp(54));
-        avatarParams.rightMargin = dp(12);
-        avatar.setScaleType(ImageView.ScaleType.CENTER_CROP);
-        avatar.setBackground(background(Color.rgb(43, 51, 70), 27));
-        avatar.setClipToOutline(true);
+        LinearLayout card = new LinearLayout(this);
+        card.setOrientation(LinearLayout.HORIZONTAL);
+        card.setGravity(Gravity.CENTER_VERTICAL);
+        card.setPadding(dp(12), dp(13), dp(7), dp(13));
+        card.setBackground(background(PANEL, 16));
         String handle = creator.toLowerCase(Locale.ROOT);
+        ImageView avatar = new ImageView(this);
+        LinearLayout.LayoutParams avatarParams = new LinearLayout.LayoutParams(dp(50), dp(50));
+        avatarParams.rightMargin = dp(11);
+        avatar.setScaleType(ImageView.ScaleType.CENTER_CROP);
+        avatar.setBackground(background(Color.rgb(43, 51, 70), 25));
+        avatar.setClipToOutline(true);
         avatarViews.put(handle, avatar);
         if (avatarCache.containsKey(handle)) avatar.setImageBitmap(avatarCache.get(handle));
         card.addView(avatar, avatarParams);
-        LinearLayout details = vertical(); details.addView(text("@" + creator, 17, WHITE, true));
-        TextView status = text("", 12, MUTED, false); updateStatusLabel(status, statuses.get(creator.toLowerCase(Locale.ROOT)));
-        marginTop(details, status, 6); statusViews.put(creator.toLowerCase(Locale.ROOT), status);
-        card.addView(details, new LinearLayout.LayoutParams(0, -2, 1));
-        Button remove = new Button(this); remove.setText("✕"); remove.setContentDescription("Creator entfernen: " + creator);
-        remove.setTextColor(WHITE); remove.setTextSize(17);
-        remove.setBackgroundTintList(android.content.res.ColorStateList.valueOf(PANEL));
+
+        LinearLayout details = vertical();
+        TextView creatorName = text(creator, 16, WHITE, true);
+        creatorName.setSingleLine(true);
+        creatorName.setEllipsize(android.text.TextUtils.TruncateAt.END);
+        details.addView(creatorName);
+        TextView creatorHandle = text("@" + creator, 12, MUTED, false);
+        creatorHandle.setSingleLine(true);
+        creatorHandle.setEllipsize(android.text.TextUtils.TruncateAt.END);
+        marginTop(details, creatorHandle, 4);
+        LinearLayout.LayoutParams detailParams = new LinearLayout.LayoutParams(0, -2, 1);
+        detailParams.rightMargin = dp(8);
+        card.addView(details, detailParams);
+        details.setOnClickListener(v -> openTikTok(creator));
+
+        TextView status = text("", 11, WHITE, true);
+        status.setGravity(Gravity.CENTER);
+        updateStatusLabel(status, statuses.get(handle));
+        statusViews.put(handle, status);
+        LinearLayout.LayoutParams badgeParams = new LinearLayout.LayoutParams(dp(80), dp(34));
+        badgeParams.rightMargin = dp(4);
+        card.addView(status, badgeParams);
+
+        TextView remove = text("✕", 21, MUTED, false);
+        remove.setGravity(Gravity.CENTER);
+        remove.setContentDescription("Creator entfernen: " + creator);
         remove.setOnClickListener(v -> new AlertDialog.Builder(this).setTitle("Creator entfernen?")
-            .setMessage("@" + creator + " aus deiner Liste entfernen?").setNegativeButton("Abbrechen", null)
+            .setMessage("@" + creator + " aus deiner Liste entfernen?")
+            .setNegativeButton("Abbrechen", null)
             .setPositiveButton("Entfernen", (dialog, which) -> {
                 creators.remove(creator); saveCreators(); showHome();
             }).show());
-        card.addView(remove, new LinearLayout.LayoutParams(dp(52), dp(52)));
-        details.setOnClickListener(v -> openTikTok(creator)); marginTop(creatorCards, card, 12);
+        card.addView(remove, new LinearLayout.LayoutParams(dp(34), dp(48)));
+        marginTop(creatorCards, card, 12);
     }
     private void updateStatusLabel(TextView label, String state) {
-        if ("live".equals(state)) { label.setText("● LIVE"); label.setTextColor(Color.rgb(55, 220, 140)); }
-        else if ("offline".equals(state)) { label.setText("● OFFLINE"); label.setTextColor(MUTED); }
-        else if ("missing".equals(state)) { label.setText("● Noch keine Daten vorhanden"); label.setTextColor(MUTED); }
-        else if ("error".equals(state)) { label.setText("● Server nicht erreichbar"); label.setTextColor(ACCENT); }
-        else { label.setText("● Status unbekannt – nächste Prüfung folgt"); label.setTextColor(BLUE); }
+        int foreground;
+        int fill;
+        String title;
+        if ("live".equals(state)) {
+            title = "● Live"; foreground = Color.rgb(43, 231, 144); fill = Color.rgb(10, 55, 43);
+        } else if ("offline".equals(state)) {
+            title = "● Offline"; foreground = Color.rgb(255, 96, 120); fill = Color.rgb(60, 24, 35);
+        } else {
+            title = "● Unbek."; foreground = Color.rgb(188, 201, 222); fill = Color.rgb(39, 48, 64);
+        }
+        label.setText(title);
+        label.setTextColor(foreground);
+        GradientDrawable pill = background(fill, 24);
+        pill.setStroke(dp(1), foreground);
+        label.setBackground(pill);
+        label.setContentDescription("Status " + title);
+    }
+    private void createNotificationChannel() {
+        if (Build.VERSION.SDK_INT >= 26) {
+            NotificationChannel channel = new NotificationChannel(LIVE_CHANNEL, "Creator geht LIVE", NotificationManager.IMPORTANCE_DEFAULT);
+            channel.setDescription("Benachrichtigungen, wenn ein gespeicherter Creator LIVE geht");
+            ((NotificationManager) getSystemService(NOTIFICATION_SERVICE)).createNotificationChannel(channel);
+        }
+    }
+    private void notifyLive(String creator) {
+        if (Build.VERSION.SDK_INT >= 33 && checkSelfPermission("android.permission.POST_NOTIFICATIONS") != PackageManager.PERMISSION_GRANTED) return;
+        Intent intent = new Intent(Intent.ACTION_VIEW, Uri.parse("https://www.tiktok.com/@" + creator));
+        PendingIntent pending = PendingIntent.getActivity(this, creator.hashCode(), intent, PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
+        Notification.Builder builder = Build.VERSION.SDK_INT >= 26 ? new Notification.Builder(this, LIVE_CHANNEL) : new Notification.Builder(this);
+        builder.setSmallIcon(R.mipmap.ic_launcher)
+            .setContentTitle("@" + creator + " ist jetzt LIVE!")
+            .setContentText("Tippe hier, um das TikTok-Profil zu öffnen.")
+            .setContentIntent(pending).setAutoCancel(true);
+        ((NotificationManager) getSystemService(NOTIFICATION_SERVICE)).notify(creator.hashCode(), builder.build());
     }
     private void fetchStatuses() {
         if (loading) return;
@@ -275,10 +347,11 @@ public class MainActivity extends Activity {
                     throw new Exception("Keine Creator");
                 }
                 connection = (HttpURLConnection) new URL(STATUS_URL + "?names=" + URLEncoder.encode(names.toString(), "UTF-8")).openConnection();
-                connection.setConnectTimeout(6000); connection.setReadTimeout(6000);
+                connection.setConnectTimeout(3000); connection.setReadTimeout(3000);
                 connection.setRequestProperty("Accept", "application/json");
                 connection.setRequestProperty("Cache-Control", "no-cache");
                 connection.setUseCaches(false);
+                connection.setRequestProperty("Cache-Control", "no-cache, no-store");
                 if (connection.getResponseCode() != 200) throw new Exception("HTTP " + connection.getResponseCode());
                 ByteArrayOutputStream bytes = new ByteArrayOutputStream();
                 try (InputStream stream = connection.getInputStream()) {
@@ -345,7 +418,13 @@ public class MainActivity extends Activity {
                 for (String creator : creators) {
                     String handle = creator.toLowerCase(Locale.ROOT);
                     int before = statusRank(creator);
-                    statuses.put(handle, ok ? latest.getOrDefault(handle, "missing") : "error");
+                    if (ok) {
+                        String previous = statuses.get(handle);
+                        String current = latest.getOrDefault(handle, "unknown");
+                        if (observedCreators.contains(handle) && "offline".equals(previous) && "live".equals(current)) notifyLive(creator);
+                        if ("live".equals(current) || "offline".equals(current)) observedCreators.add(handle);
+                        statuses.put(handle, current);
+                    } // Bei Serverfehlern den letzten bekannten Status behalten.
                     if (before != statusRank(creator)) changedOrder = true;
                     TextView label = statusViews.get(handle);
                     if (label != null) updateStatusLabel(label, statuses.get(handle));
@@ -380,12 +459,21 @@ public class MainActivity extends Activity {
         marginTop(content, text("LIVE-Status", 19, WHITE, true), 30);
         marginTop(content, text("Die App fragt den OtterMusic-Server alle 5 Sekunden ab, solange sie geöffnet ist. Der Server bestimmt selbst, wie oft TikTok geprüft wird.\n\nAuch neue TikTok-Namen werden über den OtterMusic-Server geprüft. Die eigentliche TikTok-Prüfung erfolgt nach dem Server-Intervall.", 14, MUTED, false), 12);
         marginTop(content, text("App-Updates", 19, WHITE, true), 32);
-        marginTop(content, text("Die App sucht beim Öffnen und danach höchstens alle 6 Stunden nach einer neueren Version auf ottermusic.de.", 14, MUTED, false), 12);
+        marginTop(content, text("Die App prüft beim Öffnen und während der Nutzung ungefähr alle 5 Minuten auf neue Versionen.", 14, MUTED, false), 12);
         Button updateButton = actionButton("Jetzt nach Updates suchen");
         marginTop(content, updateButton, 12);
         updateButton.setOnClickListener(v -> checkForUpdate(true));
         marginTop(content, text("Benachrichtigungen", 19, WHITE, true), 32);
-        marginTop(content, text("Benachrichtigungen beim LIVE-Start werden im nächsten Schritt ergänzt.", 14, MUTED, false), 12);
+        marginTop(content, text("Bei einem erkannten Wechsel von OFFLINE zu LIVE erscheint eine Benachrichtigung, solange die App geöffnet ist. Bei geschlossener App werden noch keine LIVE-Starts überwacht.", 14, MUTED, false), 12);
+        marginTop(content, text("Impressum", 19, WHITE, true), 32);
+        marginTop(content, text("Angaben gemäß § 5 DDG\n\nChristoph Richrath\nRichrath.eu / OtterMusic\nAm Ringofen 3\n50321 Brühl\nDeutschland\n\nKontakt\nTelefon: 02232 / 5007082", 14, MUTED, false), 12);
+        TextView email = text("info@ottermusic.de", 14, BLUE, false);
+        marginTop(content, email, 8);
+        email.setOnClickListener(v -> {
+            Intent mail = new Intent(Intent.ACTION_SENDTO, Uri.parse("mailto:info@ottermusic.de"));
+            try { startActivity(mail); } catch (Exception e) { Toast.makeText(this, "Keine E-Mail-App gefunden.", Toast.LENGTH_SHORT).show(); }
+        });
+        marginTop(content, text("Umsatzsteuer-ID gemäß § 27a UStG\nDE350214051\n\nApp-Design und Entwicklung\nOtterMusic", 14, MUTED, false), 14);
     }
     private void checkForUpdate(boolean manual) {
         if (updateChecking) return;
@@ -399,10 +487,11 @@ public class MainActivity extends Activity {
             String error = null;
             HttpURLConnection connection = null;
             try {
-                connection = (HttpURLConnection) new URL(UPDATE_URL).openConnection();
+                connection = (HttpURLConnection) new URL(UPDATE_URL + "?t=" + System.currentTimeMillis()).openConnection();
                 connection.setConnectTimeout(6000);
                 connection.setReadTimeout(6000);
                 connection.setUseCaches(false);
+                connection.setRequestProperty("Cache-Control", "no-cache, no-store");
                 if (connection.getResponseCode() != 200) throw new Exception("HTTP " + connection.getResponseCode());
                 ByteArrayOutputStream buffer = new ByteArrayOutputStream();
                 try (InputStream in = connection.getInputStream()) {
@@ -417,8 +506,9 @@ public class MainActivity extends Activity {
                 version = json.optString("versionName", String.valueOf(code));
                 apkUrl = json.getString("apkUrl");
                 Uri uri = Uri.parse(apkUrl);
-                if (!"https".equalsIgnoreCase(uri.getScheme()) || !"www.ottermusic.de".equalsIgnoreCase(uri.getHost()) ||
-                    !uri.getPath().startsWith("/tt-live-app/") || !uri.getPath().endsWith(".apk"))
+                if (!"https".equalsIgnoreCase(uri.getScheme()) ||
+                    !("ottermusic.de".equalsIgnoreCase(uri.getHost()) || "www.ottermusic.de".equalsIgnoreCase(uri.getHost())) ||
+                    !uri.getPath().startsWith("/wp-content/App/tt-live-app/") || !uri.getPath().endsWith(".apk"))
                     throw new Exception("Ungültige APK-Adresse");
                 preferences.edit().putLong("last_update_check", System.currentTimeMillis()).apply();
             } catch (Exception e) { error = e.getMessage(); }
