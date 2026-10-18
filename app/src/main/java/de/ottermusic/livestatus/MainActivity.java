@@ -62,22 +62,17 @@ public class MainActivity extends Activity {
     private static final String LIVE_CHANNEL = "ottermusic_live_starts";
     private final java.util.HashSet<String> observedCreators = new java.util.HashSet<>();
     private long downloadId = -1;
+    private static final String UPDATE_DOWNLOAD_ID = "pending_update_download_id";
+    private static final String UPDATE_TARGET_CODE = "pending_update_version_code";
+    private boolean installDialogShowing = false;
     private boolean updateChecking = false;
     private LinearLayout creatorCards;
     private final BroadcastReceiver downloadReceiver = new BroadcastReceiver() {
         @Override public void onReceive(Context context, Intent intent) {
             if (!DownloadManager.ACTION_DOWNLOAD_COMPLETE.equals(intent.getAction())) return;
             long completed = intent.getLongExtra(DownloadManager.EXTRA_DOWNLOAD_ID, -1);
-            if (completed != downloadId) return;
-            DownloadManager dm = (DownloadManager) getSystemService(DOWNLOAD_SERVICE);
-            DownloadManager.Query q = new DownloadManager.Query().setFilterById(completed);
-            try (android.database.Cursor c = dm.query(q)) {
-                if (c != null && c.moveToFirst() && c.getInt(c.getColumnIndexOrThrow(DownloadManager.COLUMN_STATUS)) == DownloadManager.STATUS_SUCCESSFUL) {
-                    new AlertDialog.Builder(MainActivity.this).setTitle("Download abgeschlossen")
-                        .setMessage("Soll die neue Version jetzt installiert werden?")
-                        .setNegativeButton("Später", null).setPositiveButton("Installieren", (d, w) -> installDownloadedApk()).show();
-                } else Toast.makeText(MainActivity.this, "Download fehlgeschlagen.", Toast.LENGTH_LONG).show();
-            } catch (Exception e) { Toast.makeText(MainActivity.this, "Download konnte nicht geprüft werden.", Toast.LENGTH_LONG).show(); }
+            if (completed != preferences.getLong(UPDATE_DOWNLOAD_ID, -1)) return;
+            checkDownloadedUpdate();
         }
     };
     private static final String STATUS_URL = "https://www.ottermusic.de/wp-json/ottermusic-live/v1/creators";
@@ -118,6 +113,8 @@ public class MainActivity extends Activity {
         getWindow().setNavigationBarColor(BG);
         preferences = getSharedPreferences("live_status", MODE_PRIVATE);
         loadCreators();
+        downloadId = preferences.getLong(UPDATE_DOWNLOAD_ID, -1);
+        cleanupInstalledUpdate();
         createNotificationChannel();
         if (Build.VERSION.SDK_INT >= 33 && checkSelfPermission("android.permission.POST_NOTIFICATIONS") != PackageManager.PERMISSION_GRANTED)
             requestPermissions(new String[]{"android.permission.POST_NOTIFICATIONS"}, 120);
@@ -129,6 +126,7 @@ public class MainActivity extends Activity {
     @Override protected void onResume() {
         super.onResume();
         visible = true;
+        checkDownloadedUpdate();
         handler.removeCallbacks(refreshTask);
         handler.post(refreshTask);
         checkForUpdate(false);
@@ -532,52 +530,133 @@ public class MainActivity extends Activity {
                     android.content.pm.PackageInfo info = getPackageManager().getPackageInfo(getPackageName(), 0);
                     installed = Build.VERSION.SDK_INT >= 28 ? info.getLongVersionCode() : info.versionCode;
                 } catch (Exception e) { installed = 0; }
-                if (latestCode > installed) {
+                if (latestCode > installed && preferences.getLong(UPDATE_DOWNLOAD_ID, -1) < 0) {
                     new AlertDialog.Builder(this).setTitle("Update verfügbar 🦦")
                         .setMessage("Version " + latestName + " ist verfügbar. Soll die neue APK heruntergeladen werden?")
                         .setNegativeButton("Nein", null)
-                        .setPositiveButton("Herunterladen", (d, w) -> downloadUpdate(latestApk)).show();
-                } else if (manual) new AlertDialog.Builder(this).setTitle("Alles aktuell")
+                        .setPositiveButton("Herunterladen", (d, w) -> downloadUpdate(latestApk, latestCode)).show();
+                } else if (manual && latestCode <= installed) new AlertDialog.Builder(this).setTitle("Alles aktuell")
                     .setMessage("Du hast bereits die neueste Version installiert.")
                     .setPositiveButton("OK", null).show();
             });
         });
     }
-    private void downloadUpdate(String apkUrl) {
+    // Eine heruntergeladene APK bleibt erhalten, bis Android das Update erfolgreich installiert hat.
+    private long installedVersionCode() {
         try {
+            android.content.pm.PackageInfo info = getPackageManager().getPackageInfo(getPackageName(), 0);
+            return Build.VERSION.SDK_INT >= 28 ? info.getLongVersionCode() : info.versionCode;
+        } catch (Exception ignored) { return -1; }
+    }
+
+    private void clearUpdateDownload() {
+        long id = preferences.getLong(UPDATE_DOWNLOAD_ID, -1);
+        if (id >= 0) {
+            try {
+                DownloadManager dm = (DownloadManager) getSystemService(DOWNLOAD_SERVICE);
+                dm.remove(id); // Entfernt auch die heruntergeladene APK.
+            } catch (Exception ignored) { }
+        }
+        preferences.edit().remove(UPDATE_DOWNLOAD_ID).remove(UPDATE_TARGET_CODE).apply();
+        downloadId = -1;
+    }
+
+    private void cleanupInstalledUpdate() {
+        long target = preferences.getLong(UPDATE_TARGET_CODE, -1);
+        if (target > 0 && installedVersionCode() >= target) clearUpdateDownload();
+    }
+
+    private void downloadUpdate(String apkUrl, int targetCode) {
+        try {
+            cleanupInstalledUpdate();
+            if (preferences.getLong(UPDATE_DOWNLOAD_ID, -1) >= 0) {
+                Toast.makeText(this, "Ein Update wurde bereits heruntergeladen oder wird geladen.", Toast.LENGTH_LONG).show();
+                checkDownloadedUpdate();
+                return;
+            }
             DownloadManager.Request request = new DownloadManager.Request(Uri.parse(apkUrl));
             request.setTitle("OtterMusic LIVE – App-Update");
             request.setDescription("Neue Android-Version wird heruntergeladen");
             request.setMimeType("application/vnd.android.package-archive");
             request.setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED);
+            // Nicht in den allgemeinen Downloads-Ordner: nur die App verwaltet diese APK.
             request.setDestinationInExternalFilesDir(this, Environment.DIRECTORY_DOWNLOADS, "OtterMusic-LIVE-Update.apk");
             DownloadManager dm = (DownloadManager) getSystemService(DOWNLOAD_SERVICE);
             downloadId = dm.enqueue(request);
+            preferences.edit().putLong(UPDATE_DOWNLOAD_ID, downloadId)
+                .putLong(UPDATE_TARGET_CODE, targetCode).apply();
             Toast.makeText(this, "Update wird heruntergeladen …", Toast.LENGTH_LONG).show();
-        } catch (Exception e) { Toast.makeText(this, "Download konnte nicht gestartet werden.", Toast.LENGTH_LONG).show(); }
+        } catch (Exception e) {
+            Toast.makeText(this, "Download konnte nicht gestartet werden.", Toast.LENGTH_LONG).show();
+        }
     }
+
+    private void checkDownloadedUpdate() {
+        cleanupInstalledUpdate();
+        long id = preferences.getLong(UPDATE_DOWNLOAD_ID, -1);
+        if (id < 0 || installDialogShowing || !visible) return;
+        DownloadManager dm = (DownloadManager) getSystemService(DOWNLOAD_SERVICE);
+        try (android.database.Cursor c = dm.query(new DownloadManager.Query().setFilterById(id))) {
+            if (c == null || !c.moveToFirst()) {
+                clearUpdateDownload();
+                return;
+            }
+            int status = c.getInt(c.getColumnIndexOrThrow(DownloadManager.COLUMN_STATUS));
+            if (status == DownloadManager.STATUS_FAILED) {
+                clearUpdateDownload();
+                Toast.makeText(this, "Update-Download fehlgeschlagen. Bitte erneut versuchen.", Toast.LENGTH_LONG).show();
+                return;
+            }
+            if (status != DownloadManager.STATUS_SUCCESSFUL) return;
+            if (dm.getUriForDownloadedFile(id) == null) {
+                clearUpdateDownload();
+                Toast.makeText(this, "Die heruntergeladene APK fehlt.", Toast.LENGTH_LONG).show();
+                return;
+            }
+            installDialogShowing = true;
+            new AlertDialog.Builder(this)
+                .setTitle("Update installieren?")
+                .setMessage("Der Download ist abgeschlossen. Soll Android das Update jetzt installieren?")
+                .setNegativeButton("Später", (d, w) -> installDialogShowing = false)
+                .setPositiveButton("Ja, installieren", (d, w) -> {
+                    installDialogShowing = false;
+                    installDownloadedApk();
+                })
+                .setOnCancelListener(d -> installDialogShowing = false)
+                .show();
+        } catch (Exception e) {
+            Toast.makeText(this, "Download konnte nicht geprüft werden.", Toast.LENGTH_LONG).show();
+        }
+    }
+
     private void installDownloadedApk() {
         try {
             if (Build.VERSION.SDK_INT >= 26 && !getPackageManager().canRequestPackageInstalls()) {
                 new AlertDialog.Builder(this).setTitle("Installation erlauben")
-                    .setMessage("Android muss einmalig die Installation von Updates aus dieser App erlauben. Danach kannst du die Installation über die Download-Benachrichtigung erneut starten.")
+                    .setMessage("Bitte erlaube Android einmalig, Updates aus dieser App zu installieren. Danach kehre zur App zurück.")
                     .setNegativeButton("Abbrechen", null)
                     .setPositiveButton("Einstellungen öffnen", (d, w) -> {
-                        Intent settings = new Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
-                            Uri.parse("package:" + getPackageName()));
-                        startActivity(settings);
+                        startActivity(new Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
+                            Uri.parse("package:" + getPackageName())));
                     }).show();
                 return;
             }
+            long id = preferences.getLong(UPDATE_DOWNLOAD_ID, -1);
+            if (id < 0) throw new Exception("Kein Download vorhanden");
             DownloadManager dm = (DownloadManager) getSystemService(DOWNLOAD_SERVICE);
-            Uri apk = dm.getUriForDownloadedFile(downloadId);
+            Uri apk = dm.getUriForDownloadedFile(id);
             if (apk == null) throw new Exception("APK fehlt");
             Intent install = new Intent(Intent.ACTION_VIEW);
             install.setDataAndType(apk, "application/vnd.android.package-archive");
             install.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
             startActivity(install);
-        } catch (Exception e) { Toast.makeText(this, "Installation konnte nicht gestartet werden.", Toast.LENGTH_LONG).show(); }
+            // Nicht hier löschen: Android muss die APK noch lesen und installieren.
+            // Bereinigung erst beim nächsten App-Start mit bestätigter neuer Version.
+        } catch (Exception e) {
+            Toast.makeText(this, "Installation konnte nicht gestartet werden.", Toast.LENGTH_LONG).show();
+        }
     }
+
     private void loadCreators() {
         creators.clear(); String json = preferences.getString("creators", "[]");
         try { JSONArray array = new JSONArray(json); for (int i=0;i<array.length();i++) creators.add(array.getString(i)); }
