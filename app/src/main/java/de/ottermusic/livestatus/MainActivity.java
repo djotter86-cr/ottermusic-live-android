@@ -2,6 +2,7 @@
 package de.ottermusic.livestatus;
 
 import android.app.Activity;
+import android.app.AlertDialog;
 import android.os.Bundle;
 import android.content.Intent;
 import android.net.Uri;
@@ -11,19 +12,19 @@ import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
 import android.view.Gravity;
 import android.view.View;
+import android.view.WindowInsets;
 import android.widget.Button;
 import android.widget.EditText;
+import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.TextView;
 import android.widget.Toast;
 
 import org.json.JSONArray;
-
 import java.util.ArrayList;
 
 public class MainActivity extends Activity {
-
     private final int BG = Color.rgb(12, 15, 25);
     private final int PANEL = Color.rgb(24, 29, 44);
     private final int WHITE = Color.WHITE;
@@ -33,17 +34,14 @@ public class MainActivity extends Activity {
     private LinearLayout root;
     private LinearLayout content;
     private EditText creatorInput;
-
     private final ArrayList<String> creators = new ArrayList<>();
     private SharedPreferences preferences;
 
     @Override
     protected void onCreate(Bundle state) {
         super.onCreate(state);
-
         getWindow().setStatusBarColor(BG);
         getWindow().setNavigationBarColor(BG);
-
         preferences = getSharedPreferences("live_status", MODE_PRIVATE);
         loadCreators();
         showHome();
@@ -76,58 +74,81 @@ public class MainActivity extends Activity {
     }
 
     private void marginTop(LinearLayout parent, View view, int top) {
-        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(
-                -1, -2
-        );
+        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(-1, -2);
         params.topMargin = dp(top);
         parent.addView(view, params);
     }
 
-    private void setup(String title) {
+    private void setup(boolean homeScreen) {
         root = vertical();
         root.setBackgroundColor(BG);
+        root.setFitsSystemWindows(false);
+        root.setOnApplyWindowInsetsListener((view, insets) -> {
+            int top;
+            int bottom;
+            if (android.os.Build.VERSION.SDK_INT >= 30) {
+                android.graphics.Insets bars = insets.getInsets(
+                        WindowInsets.Type.systemBars() | WindowInsets.Type.displayCutout());
+                top = bars.top;
+                bottom = bars.bottom;
+            } else {
+                top = insets.getSystemWindowInsetTop();
+                bottom = insets.getSystemWindowInsetBottom();
+            }
+            view.setPadding(0, top, 0, bottom);
+            return insets;
+        });
 
         ScrollView scroll = new ScrollView(this);
         scroll.setFillViewport(true);
-
+        scroll.setClipToPadding(false);
         content = vertical();
-        content.setPadding(dp(20), dp(30), dp(20), dp(28));
-
+        content.setPadding(dp(20), dp(18), dp(20), dp(28));
         scroll.addView(content);
         root.addView(scroll, new LinearLayout.LayoutParams(-1, 0, 1));
 
         LinearLayout nav = new LinearLayout(this);
-        nav.setPadding(dp(15), dp(12), dp(15), dp(16));
+        nav.setPadding(dp(15), dp(10), dp(15), dp(10));
         nav.setBackgroundColor(PANEL);
 
-        Button home = navButton("⌂  Creator");
-        Button settings = navButton("⚙  Einstellungen");
-
+        Button home = navButton("⌂  Creator", homeScreen);
+        Button settings = navButton("⚙  Einstellungen", !homeScreen);
         home.setOnClickListener(v -> showHome());
         settings.setOnClickListener(v -> showSettings());
 
-        nav.addView(home, new LinearLayout.LayoutParams(0, dp(46), 1));
-        nav.addView(settings, new LinearLayout.LayoutParams(0, dp(46), 1));
+        LinearLayout.LayoutParams left = new LinearLayout.LayoutParams(0, dp(52), 1);
+        left.rightMargin = dp(7);
+        nav.addView(home, left);
+
+        LinearLayout.LayoutParams right = new LinearLayout.LayoutParams(0, dp(52), 1);
+        right.leftMargin = dp(7);
+        nav.addView(settings, right);
 
         root.addView(nav);
         setContentView(root);
+        root.requestApplyInsets();
 
-        TextView heading = text(title, 26, WHITE, true);
-        content.addView(heading);
-
-        TextView branding = text("powered by OtterMusic", 13, MUTED, false);
-        marginTop(content, branding, 5);
+        if (homeScreen) {
+            ImageView logo = new ImageView(this);
+            logo.setImageResource(R.drawable.live_status_header);
+            logo.setScaleType(ImageView.ScaleType.FIT_CENTER);
+            logo.setAdjustViewBounds(true);
+            logo.setContentDescription("TikTok LIVE STATUS – OtterMusic");
+            content.addView(logo, new LinearLayout.LayoutParams(-1, -2));
+        } else {
+            TextView heading = text("Einstellungen", 26, WHITE, true);
+            content.addView(heading);
+        }
     }
 
-    private Button navButton(String label) {
+    private Button navButton(String label, boolean selected) {
         Button button = new Button(this);
         button.setText(label);
-        button.setTextSize(12);
+        button.setTextSize(13);
         button.setAllCaps(false);
         button.setTextColor(WHITE);
-        button.setBackgroundTintList(
-                android.content.res.ColorStateList.valueOf(PANEL)
-        );
+        button.setBackgroundTintList(android.content.res.ColorStateList.valueOf(
+                selected ? ACCENT : Color.rgb(43, 51, 70)));
         return button;
     }
 
@@ -137,20 +158,16 @@ public class MainActivity extends Activity {
         button.setAllCaps(false);
         button.setTextColor(WHITE);
         button.setTextSize(14);
-        button.setBackgroundTintList(
-                android.content.res.ColorStateList.valueOf(ACCENT)
-        );
+        button.setBackgroundTintList(android.content.res.ColorStateList.valueOf(ACCENT));
         return button;
     }
 
     private void showHome() {
-        setup("TikTok-Live Status");
+        setup(true);
 
         TextView subtitle = text(
-                "Behalte deine Lieblings-Creator im Blick.",
-                14, MUTED, false
-        );
-        marginTop(content, subtitle, 22);
+                "Behalte deine Lieblings-Creator im Blick.", 14, MUTED, false);
+        marginTop(content, subtitle, 18);
 
         LinearLayout addPanel = vertical();
         addPanel.setPadding(dp(16), dp(18), dp(16), dp(18));
@@ -166,30 +183,23 @@ public class MainActivity extends Activity {
         creatorInput.setTextColor(WHITE);
         creatorInput.setTextSize(14);
         creatorInput.setBackgroundTintList(
-                android.content.res.ColorStateList.valueOf(ACCENT)
-        );
-
+                android.content.res.ColorStateList.valueOf(ACCENT));
         marginTop(addPanel, creatorInput, 12);
 
         Button add = actionButton("+ Creator hinzufügen");
         marginTop(addPanel, add, 12);
-
         add.setOnClickListener(v -> addCreator());
-
         marginTop(content, addPanel, 24);
 
         TextView listTitle = text(
-                "Meine Creator (" + creators.size() + ")",
-                20, WHITE, true
-        );
+                "Meine Creator (" + creators.size() + ")", 20, WHITE, true);
         marginTop(content, listTitle, 26);
 
         if (creators.isEmpty()) {
             TextView empty = text(
                     "Du hast noch keine Creator gespeichert.\n"
                     + "Füge oben deinen ersten TikTok-Creator hinzu.",
-                    14, MUTED, false
-            );
+                    14, MUTED, false);
             marginTop(content, empty, 18);
         } else {
             for (String creator : new ArrayList<>(creators)) {
@@ -206,76 +216,61 @@ public class MainActivity extends Activity {
         card.setBackground(background(PANEL, 16));
 
         LinearLayout details = vertical();
-
         TextView name = text("@" + creator, 17, WHITE, true);
         details.addView(name);
 
-        TextView status = text(
-                "● Noch nicht geprüft",
-                12, MUTED, false
-        );
+        TextView status = text("● Noch nicht geprüft", 12, MUTED, false);
         marginTop(details, status, 6);
-
         card.addView(details, new LinearLayout.LayoutParams(0, -2, 1));
 
         Button remove = new Button(this);
         remove.setText("✕");
+        remove.setContentDescription("Creator entfernen: " + creator);
         remove.setTextColor(WHITE);
         remove.setTextSize(17);
         remove.setBackgroundTintList(
-                android.content.res.ColorStateList.valueOf(PANEL)
-        );
+                android.content.res.ColorStateList.valueOf(PANEL));
 
-        remove.setOnClickListener(v -> {
-            creators.remove(creator);
-            saveCreators();
-            showHome();
-        });
+        remove.setOnClickListener(v -> new AlertDialog.Builder(this)
+                .setTitle("Creator entfernen?")
+                .setMessage("@" + creator + " aus deiner Liste entfernen?")
+                .setNegativeButton("Abbrechen", null)
+                .setPositiveButton("Entfernen", (dialog, which) -> {
+                    creators.remove(creator);
+                    saveCreators();
+                    showHome();
+                }).show());
 
         card.addView(remove, new LinearLayout.LayoutParams(dp(52), dp(52)));
-
         details.setOnClickListener(v -> openTikTok(creator));
-
         marginTop(content, card, 12);
     }
 
     private void addCreator() {
         String value = creatorInput.getText().toString().trim();
-
         value = value.replaceFirst(
-                "(?i)^https?://(www\\.)?tiktok\\.com/@", ""
-        );
+                "(?i)^https?://(www\\.)?tiktok\\.com/@", "");
 
-        if (value.startsWith("@")) {
-            value = value.substring(1);
-        }
+        if (value.startsWith("@")) value = value.substring(1);
 
         int slash = value.indexOf("/");
-        if (slash >= 0) {
-            value = value.substring(0, slash);
-        }
+        if (slash >= 0) value = value.substring(0, slash);
 
         int question = value.indexOf("?");
-        if (question >= 0) {
-            value = value.substring(0, question);
-        }
+        if (question >= 0) value = value.substring(0, question);
 
         if (!value.matches("[A-Za-z0-9._]{2,24}")) {
-            Toast.makeText(
-                    this,
+            Toast.makeText(this,
                     "Bitte einen gültigen TikTok-Namen eingeben.",
-                    Toast.LENGTH_LONG
-            ).show();
+                    Toast.LENGTH_LONG).show();
             return;
         }
 
         for (String saved : creators) {
             if (saved.equalsIgnoreCase(value)) {
-                Toast.makeText(
-                        this,
+                Toast.makeText(this,
                         "Dieser Creator ist bereits gespeichert.",
-                        Toast.LENGTH_SHORT
-                ).show();
+                        Toast.LENGTH_SHORT).show();
                 return;
             }
         }
@@ -283,32 +278,23 @@ public class MainActivity extends Activity {
         creators.add(value);
         saveCreators();
         showHome();
-
-        Toast.makeText(
-                this,
-                "Creator gespeichert!",
-                Toast.LENGTH_SHORT
-        ).show();
+        Toast.makeText(this, "Creator gespeichert!", Toast.LENGTH_SHORT).show();
     }
 
     private void openTikTok(String creator) {
         try {
-            Intent intent = new Intent(
-                    Intent.ACTION_VIEW,
-                    Uri.parse("https://www.tiktok.com/@" + creator)
-            );
+            Intent intent = new Intent(Intent.ACTION_VIEW,
+                    Uri.parse("https://www.tiktok.com/@" + creator));
             startActivity(intent);
         } catch (Exception e) {
-            Toast.makeText(
-                    this,
+            Toast.makeText(this,
                     "TikTok-Profil konnte nicht geöffnet werden.",
-                    Toast.LENGTH_SHORT
-            ).show();
+                    Toast.LENGTH_SHORT).show();
         }
     }
 
     private void showSettings() {
-        setup("Einstellungen");
+        setup(false);
 
         TextView title = text("Benachrichtigungen", 19, WHITE, true);
         marginTop(content, title, 30);
@@ -318,28 +304,23 @@ public class MainActivity extends Activity {
                 + "für deine eigenen Creator aktivieren.\n\n"
                 + "Du wirst benachrichtigt, wenn einer deiner "
                 + "gespeicherten Creator live geht.",
-                14, MUTED, false
-        );
+                14, MUTED, false);
         marginTop(content, info, 12);
 
         TextView syncTitle = text(
-                "OtterMusic-Synchronisierung",
-                19, WHITE, true
-        );
+                "OtterMusic-Synchronisierung", 19, WHITE, true);
         marginTop(content, syncTitle, 32);
 
         TextView syncInfo = text(
                 "Optional kannst du deine persönlichen Creator "
                 + "später mit deinem OtterMusic-Konto synchronisieren.\n\n"
                 + "Die App funktioniert auch ohne Anmeldung.",
-                14, MUTED, false
-        );
+                14, MUTED, false);
         marginTop(content, syncInfo, 12);
     }
 
     private void loadCreators() {
         creators.clear();
-
         String json = preferences.getString("creators", "[]");
 
         try {
@@ -353,10 +334,7 @@ public class MainActivity extends Activity {
 
     private void saveCreators() {
         JSONArray array = new JSONArray();
-
-        for (String creator : creators) {
-            array.put(creator);
-        }
+        for (String creator : creators) array.put(creator);
 
         preferences.edit()
                 .putString("creators", array.toString())
